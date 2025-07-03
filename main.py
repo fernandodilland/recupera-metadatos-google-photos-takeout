@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import shutil
 import glob
+import json
 
 # --- Selección de archivo o carpeta ---
 def seleccionar_zip_o_carpeta():
@@ -55,7 +56,33 @@ def asociar_archivos_y_metadatos(carpeta_fotos):
 
     print(f"Se encontraron {len(archivos)} archivos multimedia.")
     archivos_con_metadata = {}
-    for archivo in archivos:
+    # Indexar los .json por carpeta para acelerar la búsqueda
+    jsons_por_carpeta = {}
+    for root, dirs, files in os.walk(carpeta_fotos):
+        jsons_por_carpeta[root] = [f for f in files if f.lower().endswith('.json')]
+
+    for idx, archivo in enumerate(archivos):
+        if idx % 100 == 0:
+            print(f"Procesando archivo {idx+1} de {len(archivos)}...")
+        carpeta = os.path.dirname(archivo)
+        base_nombre = os.path.splitext(os.path.basename(archivo))[0]
+        # Buscar todos los .json en la carpeta que empiecen igual (truncados o no)
+        candidatos = [f for f in jsons_por_carpeta.get(carpeta, []) if f.startswith(base_nombre[:30])]
+        asociado = None
+        for candidato in candidatos:
+            ruta_json = os.path.join(carpeta, candidato)
+            try:
+                with open(ruta_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # Validar que sea metadata de Google Takeout
+                if any(k in data for k in ['photoTakenTime', 'creationTime', 'title', 'creation_time', 'creationTimestamp']):
+                    asociado = ruta_json
+                    break
+            except Exception:
+                continue
+        if asociado:
+            archivos_con_metadata[archivo] = asociado
+            continue
         # 1. Buscar metadata con el mismo nombre + .json
         metadata_file = archivo + '.json'
         if os.path.isfile(metadata_file):
