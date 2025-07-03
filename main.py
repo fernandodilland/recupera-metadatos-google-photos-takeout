@@ -21,19 +21,20 @@ def seleccionar_zip_o_carpeta():
 
 # --- Descomprimir ZIP (incluyendo multipartes) ---
 def descomprimir_zip(zip_path, destino):
-    # Si es multipartes, buscar todos los takeout-*.zip en el mismo directorio
     base = os.path.basename(zip_path)
     dir_ = os.path.dirname(zip_path)
     prefix = base.split(".zip")[0]
     partes = sorted(glob.glob(os.path.join(dir_, prefix + "*.zip")))
     if len(partes) > 1:
-        # Unir los zips en uno temporal
+        print(f"Descomprimiendo varias partes: {', '.join([os.path.basename(p) for p in partes])}")
         temp_zip = os.path.join(dir_, "_takeout_temp.zip")
         with open(temp_zip, "wb") as wfd:
             for p in partes:
                 with open(p, "rb") as fd:
                     shutil.copyfileobj(fd, wfd)
         zip_path = temp_zip
+    else:
+        print(f"Descomprimiendo: {base}")
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(destino)
     if os.path.exists(os.path.join(dir_, "_takeout_temp.zip")):
@@ -68,7 +69,7 @@ def asociar_archivos_y_metadatos(carpeta_fotos):
         base_nombre = os.path.splitext(os.path.basename(archivo))[0]
         # Buscar todos los .json en la carpeta que empiecen igual (truncados o no)
         candidatos = [f for f in jsons_por_carpeta.get(carpeta, []) if f.startswith(base_nombre[:30])]
-        asociado = None
+        metadatas = []
         for candidato in candidatos:
             ruta_json = os.path.join(carpeta, candidato)
             try:
@@ -76,48 +77,41 @@ def asociar_archivos_y_metadatos(carpeta_fotos):
                     data = json.load(f)
                 # Validar que sea metadata de Google Takeout
                 if any(k in data for k in ['photoTakenTime', 'creationTime', 'title', 'creation_time', 'creationTimestamp']):
-                    asociado = ruta_json
-                    break
+                    metadatas.append(ruta_json)
             except Exception:
                 continue
-        if asociado:
-            archivos_con_metadata[archivo] = asociado
-            continue
-        # 1. Buscar metadata con el mismo nombre + .json
-        metadata_file = archivo + '.json'
-        if os.path.isfile(metadata_file):
-            archivos_con_metadata[archivo] = metadata_file
-            continue
-        # 2. Buscar metadata cambiando la extensión a .json
-        base, _ = os.path.splitext(archivo)
-        metadata_file2 = base + '.json'
-        if os.path.isfile(metadata_file2):
-            archivos_con_metadata[archivo] = metadata_file2
-            continue
-        # 3. Caso especial: foo(1).jpg <-> foo.jpg(1).json
+        # También buscar los patrones fijos por si acaso
+        patrones = [
+            archivo + '.json',
+            os.path.splitext(archivo)[0] + '.json',
+            # Caso especial: foo(1).jpg <-> foo.jpg(1).json
+            None,
+            archivo + '.supplemental-metadata.json',
+            archivo + '.supplement-metad.json',
+            archivo + '.supplement.json'
+        ]
         import re
         filename, extension = os.path.splitext(archivo)
         parts = re.split(r'(\(\d+\))$', filename, maxsplit=1)
         if len(parts) == 3:
-            metadata_file3 = f'{parts[0]}{extension}{parts[1]}.json'
-            if os.path.isfile(metadata_file3):
-                archivos_con_metadata[archivo] = metadata_file3
-                continue
-        # 4. Buscar metadata supplemental-metadata
-        metadata_file4 = archivo + '.supplemental-metadata.json'
-        if os.path.isfile(metadata_file4):
-            archivos_con_metadata[archivo] = metadata_file4
-            continue
-        # 5. Buscar metadata supplemental-metad.json (caso álbumes)
-        metadata_file5 = archivo + '.supplemental-metad.json'
-        if os.path.isfile(metadata_file5):
-            archivos_con_metadata[archivo] = metadata_file5
-            continue
-        archivos_con_metadata[archivo] = None
+            patrones[2] = f'{parts[0]}{extension}{parts[1]}.json'
+        for p in patrones:
+            if p and os.path.isfile(p) and p not in metadatas:
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if any(k in data for k in ['photoTakenTime', 'creationTime', 'title', 'creation_time', 'creationTimestamp']):
+                        metadatas.append(p)
+                except Exception:
+                    continue
+        archivos_con_metadata[archivo] = metadatas if metadatas else None
 
     print(f"Asociación de archivos y metadatos completada. Ejemplo:")
     for i, (k, v) in enumerate(archivos_con_metadata.items()):
-        print(f"{os.path.basename(k)} -> {os.path.basename(v) if v else 'Sin metadata'}")
+        if v:
+            print(f"{os.path.basename(k)} -> {[os.path.basename(x) for x in v]}")
+        else:
+            print(f"{os.path.basename(k)} -> Sin metadata")
         if i > 10:
             break
     return archivos_con_metadata
@@ -144,16 +138,20 @@ def main():
     print(f"Carpeta de fotos encontrada: {carpeta_fotos}")
     archivos_con_metadata = asociar_archivos_y_metadatos(carpeta_fotos)
     
-    for archivo, metadata in archivos_con_metadata.items():
-        if metadata:
-            # Aquí iría tu lógica para procesar la metadata y agregarla a la foto/video
-            # Por ejemplo: escribir EXIF, copiar, renombrar, etc.
-            # Una vez procesado, borra el archivo de metadatos:
-            try:
-                os.remove(metadata)
-                print(f"Borrado metadatos: {os.path.basename(metadata)}")
-            except Exception as e:
-                print(f"No se pudo borrar {metadata}: {e}")
+    archivos_borrados = set()
+    for archivo, metadatas in archivos_con_metadata.items():
+        if metadatas:
+            for metadata in metadatas:
+                # Aquí iría tu lógica para procesar la metadata y agregarla a la foto/video
+                # Por ejemplo: escribir EXIF, copiar, renombrar, etc.
+                # Una vez procesado, borra el archivo de metadatos solo si no se ha borrado antes:
+                if metadata not in archivos_borrados:
+                    try:
+                        os.remove(metadata)
+                        archivos_borrados.add(metadata)
+                        print(f"Borrado metadatos: {os.path.basename(metadata)}")
+                    except Exception as e:
+                        print(f"No se pudo borrar {metadata}: {e}")
 
 if __name__ == "__main__":
     main()
